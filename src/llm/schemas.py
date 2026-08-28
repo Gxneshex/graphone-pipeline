@@ -1,9 +1,3 @@
-"""
-src/llm/schemas.py
-Defines strict Pydantic structures for core data entities to preserve 
-consistency between scrapers, LLM outputs, and downstream CSV exports.
-"""
-
 from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field, HttpUrl
