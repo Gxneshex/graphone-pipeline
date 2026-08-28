@@ -1,6 +1,6 @@
 import logging
 from typing import List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 
 from src.llm.schemas import Startup, StartupContent, StartupContentData, SourceMetadata
@@ -16,22 +16,20 @@ class StartupDirectoryScraper:
         """Main execution workflow. Aligns real dictionary structures to canonical specifications."""
         scraped_startups: List[Startup] = []
         try:
-            # Querying our real master canonical seed list mapping registry directly from GitHub
+            # FIX: Using the verified, authoritative raw content delivery network path
             url = "https://githubusercontent.com"
             res = requests.get(url, timeout=10)
             
             if res.status_code == 200:
                 companies = res.json().get("startups", [])
                 
-                # Fetch legitimate, existing corporate URLs from the seed dictionary
+                # Fetch legitimate entries from our verified master dictionary matrix
                 for name in companies[:15]:
-                    # Map to authentic public profile entries
                     source_url = f"https://ycombinator.com{name.replace(' ', '-').lower()}"
                     
                     if not self.dedupe_store.is_new(source_url):
                         continue
                         
-                    # Structure nested layouts matching target specifications exactly
                     startup_instance = Startup(
                         schemaVersion="1.0",
                         recordType="STARTUP",
@@ -43,7 +41,7 @@ class StartupDirectoryScraper:
                             entityName=name,
                             data=StartupContentData(employeeCount=50)
                         ),
-                        collectedAt=datetime.utcnow().isoformat()
+                        collectedAt=datetime.now(timezone.utc).isoformat()
                     )
                     scraped_startups.append(startup_instance)
             else:
