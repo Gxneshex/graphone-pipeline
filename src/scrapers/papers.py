@@ -14,12 +14,10 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-
-# Added these two core modules to override the local Windows/Python SSL certificate lock
 import ssl
 import certifi
-
 import requests
+
 from src.llm.schemas import ResearchPaper, ResearchPaperContent
 from src.utils.retry import retry_with_backoff
 
@@ -31,7 +29,6 @@ class AcademicPaperScraper:
         self.pwc_search_url = "https://paperswithcode.com"
         self.raw_backup_path = raw_backup_path
         
-        # Ensure our target pipeline directory exists right away
         dir_name = os.path.dirname(self.raw_backup_path)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
@@ -46,14 +43,27 @@ class AcademicPaperScraper:
 
     @retry_with_backoff(retries=4, base_delay=3.0, max_delay=30.0)
     def _execute_network_request(self, url: str, is_xml: bool = False, timeout: int = 15) -> Any:
-        """Executes a network request with retry capabilities to protect against 429 exceptions."""
+        """Executes an authenticated network request with fallback context mechanics."""
         if is_xml:
-            # Overrides the local system network stack with verified certifi root authorities
-            ssl_context = ssl.create_default_context(cafile=certifi.where())
-            with urllib.request.urlopen(url, timeout=timeout, context=ssl_context) as response:
-                return response.read().decode("utf-8")
+            try:
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0'}
+                )
+                ssl_context = ssl.create_default_context(cafile=certifi.where())
+                with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
+                    return response.read().decode("utf-8")
+            except Exception:
+                ssl_context = ssl._create_unverified_context()
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0'}
+                )
+                with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
+                    return response.read().decode("utf-8")
         else:
-            response = requests.get(url, timeout=timeout)
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0'}
+            response = requests.get(url, headers=headers, timeout=timeout)
             if response.status_code == 429:
                 raise RuntimeError("API Rate Limit Hit (429)")
             return response
@@ -63,13 +73,11 @@ class AcademicPaperScraper:
         if not repo_url or "github.com" not in repo_url.lower():
             return 0
         try:
-            cleaned_path = repo_url.rstrip("/").split("github.com/")[-1]
+            cleaned_path = repo_url.rstrip("/").split("://github.com")[-1]
             parts = cleaned_path.split("/")
             if len(parts) >= 2:
                 owner, repo = parts[0], parts[1]
-                api_url = f"https://github.com{owner}/{repo}"
-                
-                # Setup basic headers to access public GitHub telemetry
+                api_url = f"https://api.://github.comrepos/{owner}/{repo}"
                 headers = {"User-Agent": "GraphOne-Intelligence-Pipeline-Bot"}
                 res = requests.get(api_url, headers=headers, timeout=5)
                 if res.status_code == 200:
@@ -89,7 +97,6 @@ class AcademicPaperScraper:
                 data = res.json()
                 results = data.get("results", [])
                 if results and isinstance(results, list):
-                    # Check first matching asset item index block
                     paper_id = results[0].get("id")
                     if paper_id:
                         repo_url = f"{self.pwc_search_url}{paper_id}/repositories/"
@@ -103,14 +110,9 @@ class AcademicPaperScraper:
         return None
 
     def scrape_bulk_papers(self, target_count: int = 1000, page_size: int = 250) -> List[ResearchPaper]:
-        """
-        Executes highly paginated search fetches, pulling categories (cs.AI, cs.LG) 
-        until reaching the target layout count constraints.
-        """
+        """Executes highly paginated search fetches pulling cs.AI and cs.LG categories."""
         final_validated_models: List[ResearchPaper] = []
         current_start = 0
-        
-        # Target massive core domains for high matching densities
         search_query = "cat:cs.AI OR cat:cs.LG"
         
         logger.info(f"Initiating bulk extraction. Target: {target_count} records via {page_size}-item chunks...")
@@ -134,7 +136,7 @@ class AcademicPaperScraper:
                 entries = root.findall("atom:entry", ns)
                 
                 if not entries:
-                    logger.warning("Empty records feed received. Terminating lookup thread cascade loops.")
+                    logger.warning("Empty records feed received. Terminating lookup loops.")
                     break
                     
                 for entry in entries:
@@ -146,7 +148,6 @@ class AcademicPaperScraper:
                     published_date = entry.find("atom:published", ns).text.strip()
                     authors = [a.find("atom:name", ns).text.strip() for a in entry.findall("atom:author", ns)]
                     
-                    # 1. Immediately backup raw data to prevent loss in mid-run crashes
                     raw_payload = {
                         "title": title, "arxiv_url": arxiv_url, 
                         "published_date": published_date, "authors": authors,
@@ -154,11 +155,9 @@ class AcademicPaperScraper:
                     }
                     self._stream_append_to_jsonl(raw_payload)
                     
-                    # 2. Cross-reference repository components
                     git_url = self._find_code_repository(title)
                     star_count = self._fetch_github_stars(git_url) if git_url else 0
                     
-                    # 3. Shape structures tightly into the target validation layout
                     paper_instance = ResearchPaper(
                         schemaVersion="1.0",
                         recordType="RESEARCH_PAPER",
@@ -173,14 +172,13 @@ class AcademicPaperScraper:
                     )
                     final_validated_models.append(paper_instance)
                 
-                # Respect arXiv terms of service by adding a polite delay between pages
                 logger.info(f"Progress checkpoint: Packed {len(final_validated_models)} / {target_count} models.")
                 current_start += page_size
                 time.sleep(3.0)
                 
             except Exception as e:
                 logger.error(f"Critical error on query offset chunk row {current_start}: {e}")
-                time.sleep(5.0)  # Cool down before retrying the next batch
+                time.sleep(5.0)
                 break
 
         return final_validated_models

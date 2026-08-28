@@ -1,8 +1,14 @@
+"""
+src/scrapers/jobs.py
+Aggregates tech employment vacancies and corporate hiring data feeds,
+enforcing tracking deduplication and strict schema parsing.
+"""
+
 import logging
 from typing import List, Dict, Any
 from datetime import datetime
 
-from src.llm.schemas import Job
+from src.llm.schemas import Job, JobContent
 from src.utils.dedupe_store import URLDedupeStore
 from src.utils.retry import retry_with_backoff
 
@@ -10,14 +16,10 @@ logger = logging.getLogger("graphone-pipeline.scrapers.jobs")
 
 class JobBoardScraper:
     def __init__(self, dedupe_store: URLDedupeStore = None):
-        # Bind unified tracking storage to check URL freshness
         self.dedupe_store = dedupe_store if dedupe_store else URLDedupeStore()
 
     @retry_with_backoff(retries=3, base_delay=1.5)
     def _fetch_mock_job_postings(self) -> List[Dict[str, Any]]:
-        """
-        Simulates an API request or HTML parsing routine from tech job boards.
-        """
         logger.info("Polling remote tech job discovery networks...")
         return [
             {
@@ -41,39 +43,26 @@ class JobBoardScraper:
         ]
 
     def scrape_jobs(self) -> List[Job]:
-        """
-        Main execution workflow. Polls data feeds, processes items through 
-        uniqueness filters, and builds validated Job instances.
-        """
+        """Main execution workflow. Packs fields into valid nested content targets."""
         scraped_jobs: List[Job] = []
-        
         try:
             raw_data = self._fetch_mock_job_postings()
-            
             for item in raw_data:
                 job_board_url = item.get("job_board_url", "")
-                
-                # Check for duplicate processing history
                 if not self.dedupe_store.is_new(job_board_url):
-                    logger.info(f"Skipping duplicate job listing: {item.get('job_title')} at {item.get('company_name')}")
                     continue
                     
-                logger.info(f"Ingesting new job listing: {item.get('job_title')} at {item.get('company_name')}")
-                
-                # Standardize properties through our Pydantic structure
-                job_model = Job(
-                    job_title=item.get("job_title"),
-                    company_name=item.get("company_name"),
-                    location=item.get("location"),
-                    salary_range=item.get("salary_range"),
-                    experience_level=item.get("experience_level"),
-                    requirements=item.get("requirements", []),
-                    job_board_url=job_board_url,
-                    extracted_at=datetime.utcnow()
+                job_instance = Job(
+                    schemaVersion="1.0",
+                    recordType="JOB",
+                    content=JobContent(
+                        company=item.get("company_name"),
+                        date=datetime.utcnow().isoformat(),
+                        is_remote=True if "remote" in item.get("location", "").lower() else False,
+                        role_family="Engineering"
+                    )
                 )
-                scraped_jobs.append(job_model)
-                
+                scraped_jobs.append(job_instance)
         except Exception as e:
             logger.error(f"Encountered a breakdown in job tracking workflow: {e}")
-            
         return scraped_jobs
