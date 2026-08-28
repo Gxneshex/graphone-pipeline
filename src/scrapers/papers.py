@@ -15,6 +15,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
+# Added these two core modules to override the local Windows/Python SSL certificate lock
+import ssl
+import certifi
+
 import requests
 from src.llm.schemas import ResearchPaper, ResearchPaperContent
 from src.utils.retry import retry_with_backoff
@@ -23,7 +27,7 @@ logger = logging.getLogger("graphone-pipeline.scrapers.papers")
 
 class AcademicPaperScraper:
     def __init__(self, raw_backup_path: str = "data/output/raw_papers_cache.jsonl"):
-        self.arxiv_base_url = "http://export.arxiv.org/api/query?"
+        self.arxiv_base_url = "http://arxiv.org?"
         self.pwc_search_url = "https://paperswithcode.com"
         self.raw_backup_path = raw_backup_path
         
@@ -44,7 +48,9 @@ class AcademicPaperScraper:
     def _execute_network_request(self, url: str, is_xml: bool = False, timeout: int = 15) -> Any:
         """Executes a network request with retry capabilities to protect against 429 exceptions."""
         if is_xml:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            # Overrides the local system network stack with verified certifi root authorities
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            with urllib.request.urlopen(url, timeout=timeout, context=ssl_context) as response:
                 return response.read().decode("utf-8")
         else:
             response = requests.get(url, timeout=timeout)
