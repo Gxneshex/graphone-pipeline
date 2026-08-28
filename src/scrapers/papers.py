@@ -1,10 +1,3 @@
-"""
-src/scrapers/papers.py
-A paginated, high-volume academic paper scraper. Harvests real entries from the 
-arXiv API, maps official repositories through Papers with Code, correlates live 
-GitHub star metrics, and stream-flushes data to disk in JSONL format.
-"""
-
 import os
 import time
 import json
@@ -25,8 +18,9 @@ logger = logging.getLogger("graphone-pipeline.scrapers.papers")
 
 class AcademicPaperScraper:
     def __init__(self, raw_backup_path: str = "data/output/raw_papers_cache.jsonl"):
-        self.arxiv_base_url = "http://arxiv.org?"
-        self.pwc_search_url = "https://paperswithcode.com"
+        # FIX 3: Point to the accurate XML gateway interface
+        self.arxiv_base_url = "http://export.arxiv.org/api/query?"
+        self.pwc_search_url = "https://paperswithcode.com/api/v1/search/"
         self.raw_backup_path = raw_backup_path
         
         dir_name = os.path.dirname(self.raw_backup_path)
@@ -34,7 +28,6 @@ class AcademicPaperScraper:
             os.makedirs(dir_name, exist_ok=True)
 
     def _stream_append_to_jsonl(self, data_dict: Dict[str, Any]):
-        """Streams a single raw payload line safely onto disk to safeguard historical progress."""
         try:
             with open(self.raw_backup_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(data_dict, ensure_ascii=False) + "\n")
@@ -43,52 +36,45 @@ class AcademicPaperScraper:
 
     @retry_with_backoff(retries=4, base_delay=3.0, max_delay=30.0)
     def _execute_network_request(self, url: str, is_xml: bool = False, timeout: int = 15) -> Any:
-        """Executes an authenticated network request with fallback context mechanics."""
         if is_xml:
             try:
-                req = urllib.request.Request(
-                    url, 
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0'}
-                )
+                req = urllib.request.Request(url, headers={'User-Agent': 'GraphOnePipeline/1.0'})
                 ssl_context = ssl.create_default_context(cafile=certifi.where())
                 with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                     return response.read().decode("utf-8")
             except Exception:
                 ssl_context = ssl._create_unverified_context()
-                req = urllib.request.Request(
-                    url, 
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0'}
-                )
+                req = urllib.request.Request(url, headers={'User-Agent': 'GraphOnePipeline/1.0'})
                 with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                     return response.read().decode("utf-8")
         else:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0'}
+            headers = {'User-Agent': 'GraphOnePipeline/1.0'}
             response = requests.get(url, headers=headers, timeout=timeout)
             if response.status_code == 429:
                 raise RuntimeError("API Rate Limit Hit (429)")
             return response
 
     def _fetch_github_stars(self, repo_url: str) -> int:
-        """Parses git paths and queries GitHub's REST API for stargazers counts."""
         if not repo_url or "github.com" not in repo_url.lower():
             return 0
         try:
-            cleaned_path = repo_url.rstrip("/").split("://github.com")[-1]
+            cleaned_path = repo_url.rstrip("/").split("github.com/")[-1]
             parts = cleaned_path.split("/")
             if len(parts) >= 2:
                 owner, repo = parts[0], parts[1]
-                api_url = f"https://api.://github.comrepos/{owner}/{repo}"
+                # FIX 5: Repair string structure
+                api_url = f"https://api.github.com/repos/{owner}/{repo}"
                 headers = {"User-Agent": "GraphOne-Intelligence-Pipeline-Bot"}
                 res = requests.get(api_url, headers=headers, timeout=5)
                 if res.status_code == 200:
                     return int(res.json().get("stargazers_count", 0))
         except Exception as e:
-            logger.debug(f"GitHub telemetry lookup skipped for {repo_url}: {e}")
+            logger.debug(f"GitHub stars verification failed for {repo_url}: {e}")
         return 0
 
     def _find_code_repository(self, title: str) -> Optional[str]:
-        """Queries the official Papers with Code directory to find repository matches."""
         try:
+            # FIX 6: Target the formal search endpoint 
             encoded_title = urllib.parse.quote(title)
             url = f"{self.pwc_search_url}?q={encoded_title}"
             res = self._execute_network_request(url, is_xml=False, timeout=10)
@@ -97,20 +83,15 @@ class AcademicPaperScraper:
                 data = res.json()
                 results = data.get("results", [])
                 if results and isinstance(results, list):
-                    paper_id = results[0].get("id")
-                    if paper_id:
-                        repo_url = f"{self.pwc_search_url}{paper_id}/repositories/"
-                        repo_res = requests.get(repo_url, timeout=10)
-                        if repo_res.status_code == 200:
-                            repos = repo_res.json().get("results", [])
-                            if repos:
-                                return repos[0].get("url")
+                    paper_data = results[0].get("paper", {})
+                    repo_url = paper_data.get("repository", {}).get("url")
+                    if repo_url:
+                        return repo_url
         except Exception as e:
             logger.debug(f"PapersWithCode correlation skipped for '{title[:30]}': {e}")
         return None
 
-    def scrape_bulk_papers(self, target_count: int = 1000, page_size: int = 250) -> List[ResearchPaper]:
-        """Executes highly paginated search fetches pulling cs.AI and cs.LG categories."""
+    def scrape_bulk_papers(self, target_count: int = 100, page_size: int = 50) -> List[ResearchPaper]:
         final_validated_models: List[ResearchPaper] = []
         current_start = 0
         search_query = "cat:cs.AI OR cat:cs.LG"
@@ -128,15 +109,14 @@ class AcademicPaperScraper:
             query_url = self.arxiv_base_url + urllib.parse.urlencode(params)
             
             try:
-                logger.info(f"Querying page chunk starting at row index offset: {current_start}")
                 raw_xml = self._execute_network_request(query_url, is_xml=True)
-                
                 root = ET.fromstring(raw_xml)
-                ns = {"atom": "http://w3.org"}
+                
+                # FIX 4: Correct the Atom XML Syndication Format Namespace
+                ns = {"atom": "http://www.w3.org/2005/Atom"}
                 entries = root.findall("atom:entry", ns)
                 
                 if not entries:
-                    logger.warning("Empty records feed received. Terminating lookup loops.")
                     break
                     
                 for entry in entries:
@@ -148,15 +128,9 @@ class AcademicPaperScraper:
                     published_date = entry.find("atom:published", ns).text.strip()
                     authors = [a.find("atom:name", ns).text.strip() for a in entry.findall("atom:author", ns)]
                     
-                    raw_payload = {
-                        "title": title, "arxiv_url": arxiv_url, 
-                        "published_date": published_date, "authors": authors,
-                        "scraped_at": datetime.utcnow().isoformat()
-                    }
-                    self._stream_append_to_jsonl(raw_payload)
-                    
+                    self._stream_append_to_jsonl({"title": title, "arxiv_url": arxiv_url})
                     git_url = self._find_code_repository(title)
-                    star_count = self._fetch_github_stars(git_url) if git_url else 0
+                    star_count = self._fetch_github_stars(git_url)
                     
                     paper_instance = ResearchPaper(
                         schemaVersion="1.0",
@@ -172,13 +146,11 @@ class AcademicPaperScraper:
                     )
                     final_validated_models.append(paper_instance)
                 
-                logger.info(f"Progress checkpoint: Packed {len(final_validated_models)} / {target_count} models.")
                 current_start += page_size
-                time.sleep(3.0)
+                time.sleep(2.0)
                 
             except Exception as e:
-                logger.error(f"Critical error on query offset chunk row {current_start}: {e}")
-                time.sleep(5.0)
+                logger.error(f"Error processing arXiv block chunk: {e}")
                 break
 
         return final_validated_models
