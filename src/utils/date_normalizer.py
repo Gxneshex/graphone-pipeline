@@ -5,6 +5,7 @@ enforcing strict 24-hour freshness filters across news and job boards.
 """
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional  # <--- Added this line to fix the NameError
 import logging
 import dateparser
 
