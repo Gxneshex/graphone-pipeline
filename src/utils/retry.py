@@ -1,9 +1,3 @@
-"""
-src/utils/retry.py
-Provides robust execution wrappers with exponential backoff and randomized jitter 
-to handle HTTP 429 (Too Many Requests) and transient network failures gracefully.
-"""
-
 import time
 import random
 import logging
