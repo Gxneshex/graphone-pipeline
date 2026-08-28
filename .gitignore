@@ -1,0 +1,33 @@
+# ==============================================================================
+# Graphone-Pipeline Git Ignore Rules
+# ==============================================================================
+
+# Private Secret Files (CRITICAL - Never commit your live API keys)
+.env
+.env.local
+.env.*.local
+
+# Local Python Runtime Data & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Project Generated Outputs (Keep the directories, ignore the actual tracking files)
+data/output/*.json
+data/output/*.csv
+data/output/*.log
+
+# Exception rules: Allow Git to track folder paths via placeholders
+!data/output/.gitkeep
+
+# System & OS Files
+.DS_Store
+Thumbs.db
