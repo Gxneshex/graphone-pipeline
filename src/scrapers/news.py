@@ -32,8 +32,12 @@ class TechNewsScraper:
         for source_name, feed_url in FEEDS.items():
             try:
                 parsed = feedparser.parse(feed_url)
+                if getattr(parsed, "bozo", 0) and not parsed.entries:
+                    bozo_exc = getattr(parsed, "bozo_exception", "Unknown RSS feed parsing error")
+                    logger.error(f"RSS feed fetch/parse error for {source_name} at {feed_url}: {bozo_exc}")
+                    continue
             except Exception as e:
-                logger.error(f"Feed fetch failed for {source_name}: {e}")
+                logger.error(f"RSS feed fetch network call failed for {source_name} at {feed_url}: {e}")
                 continue
 
             for entry in parsed.entries:
@@ -49,7 +53,7 @@ class TechNewsScraper:
                     published_dt = datetime(*published[:6], tzinfo=timezone.utc)
                     published_iso = published_dt.isoformat()
                 except Exception as e:
-                    logger.debug(f"Could not convert published date for {url}: {e}")
+                    logger.warning(f"Could not convert published date for {source_name} article at {url}: {e}")
                     continue
 
                 # Filter strictly to articles published in the last 24 hours
@@ -61,7 +65,7 @@ class TechNewsScraper:
                     downloaded = trafilatura.fetch_url(url)
                     full_text = trafilatura.extract(downloaded) if downloaded else ""
                 except Exception as e:
-                    logger.debug(f"Trafilatura extraction failed for {url}: {e}")
+                    logger.error(f"Trafilatura extraction network call failed for {source_name} article at {url}: {e}")
                     full_text = ""
 
                 scraped_articles.append({

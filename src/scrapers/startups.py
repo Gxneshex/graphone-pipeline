@@ -36,7 +36,7 @@ class StartupDirectoryScraper:
                     if app and key:
                         return app, key
         except Exception as e:
-            logger.warning(f"Could not extract dynamic Algolia credentials: {e}. Using defaults.")
+            logger.warning(f"Could not extract dynamic Algolia credentials from https://www.ycombinator.com/companies: {e}. Using defaults.")
         return DEFAULT_ALGOLIA_APP, DEFAULT_ALGOLIA_KEY
 
     def scrape_startups(self, target_count: int = 1000) -> List[Startup]:
@@ -63,7 +63,7 @@ class StartupDirectoryScraper:
                 res = requests.post(endpoint, json=payload, headers=headers, timeout=12)
                 
                 if res.status_code != 200:
-                    logger.error(f"Algolia query failed on page {page} with status {res.status_code}")
+                    logger.error(f"Algolia query call to {endpoint} (page {page}) failed with status code {res.status_code}")
                     break
                     
                 data = res.json()
@@ -108,7 +108,7 @@ class StartupDirectoryScraper:
                     
                 page += 1
             except Exception as e:
-                logger.error(f"Error requesting YC Algolia batch page {page}: {e}")
+                logger.error(f"Algolia scraper network call to {endpoint} (page {page}) failed with error: {e}")
                 break
                 
         logger.info(f"Successfully collected {len(scraped_startups)} real YC startups.")

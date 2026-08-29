@@ -87,9 +87,9 @@ class JobBoardScraper:
                         )
                     ))
             else:
-                logger.warning(f"RemoteOK API returned status code {res.status_code}")
+                logger.error(f"RemoteOK API call to https://remoteok.com/api failed with status code {res.status_code}")
         except Exception as e:
-            logger.error(f"RemoteOK scraper encountered an error: {e}")
+            logger.error(f"RemoteOK API scraper call to https://remoteok.com/api failed with error: {e}")
 
         # 2. Scrape Arbeitnow API as second real data source
         try:
@@ -144,8 +144,10 @@ class JobBoardScraper:
                             role_family=role_family
                         )
                     ))
+            else:
+                logger.error(f"Arbeitnow API call to https://www.arbeitnow.com/api/job-board-api failed with status code {res.status_code}")
         except Exception as e:
-            logger.error(f"Arbeitnow scraper encountered an error: {e}")
+            logger.error(f"Arbeitnow API scraper call to https://www.arbeitnow.com/api/job-board-api failed with error: {e}")
 
         logger.info(f"Successfully collected {len(scraped_jobs)} real job listings.")
         return scraped_jobs
