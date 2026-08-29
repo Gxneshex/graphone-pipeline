@@ -40,6 +40,8 @@ def is_within_24_hours(iso_date_string: str) -> bool:
         
     try:
         published_dt = datetime.fromisoformat(iso_date_string)
+        if published_dt.tzinfo is None:
+            published_dt = published_dt.replace(tzinfo=timezone.utc)
         now_utc = datetime.now(timezone.utc)
         
         # Determine strict 24-hour delta limits

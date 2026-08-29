@@ -81,3 +81,11 @@ class Job(BaseModel):
     schemaVersion: str = Field("1.0", description="Versioning for the schema.")
     recordType: str = Field("JOB", literal=True)
     content: JobContent
+
+# ==============================================================================
+# 5. NEWS SUMMARY SCHEMA
+# ==============================================================================
+class NewsArticleAnalysis(BaseModel):
+    summary: str = Field(..., description="Executive summary of the news article.")
+    key_facts: List[str] = Field(default_factory=list, description="Key extracted facts from the article.")
+

@@ -11,6 +11,7 @@ import requests
 
 from src.llm.schemas import Job, JobContent
 from src.utils.dedupe_store import URLDedupeStore
+from src.utils.date_normalizer import is_within_24_hours, normalize_publication_date
 
 logger = logging.getLogger("graphone-pipeline.scrapers.jobs")
 
@@ -47,13 +48,27 @@ class JobBoardScraper:
                         continue
                         
                     company = item.get("company", "").strip() or "Tech Venture"
-                    pub_date = item.get("date", "").strip()
-                    if not pub_date:
+                    raw_date = item.get("date", "")
+                    if isinstance(raw_date, str):
+                        raw_date = raw_date.strip()
+                    else:
+                        raw_date = ""
+
+                    pub_date = None
+                    if raw_date:
+                        pub_date = normalize_publication_date(raw_date) or raw_date
+                    else:
                         epoch = item.get("epoch")
                         if epoch:
-                            pub_date = datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat()
-                        else:
-                            continue
+                            try:
+                                pub_date = datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat()
+                            except Exception:
+                                pub_date = None
+
+                    # Skip job if date is unparseable, missing, or outside 24h window
+                    if not pub_date or not is_within_24_hours(pub_date):
+                        logger.debug(f"Skipping RemoteOK job with invalid/stale date: {pub_date}")
+                        continue
                             
                     position = item.get("position", "")
                     tags = item.get("tags", [])
@@ -93,11 +108,25 @@ class JobBoardScraper:
                         
                     company = item.get("company_name", "").strip() or "Tech Enterprise"
                     created_at = item.get("created_at")
-                    if isinstance(created_at, int):
-                        pub_date = datetime.fromtimestamp(created_at, tz=timezone.utc).isoformat()
-                    elif isinstance(created_at, str) and created_at:
-                        pub_date = created_at
-                    else:
+                    pub_date = None
+                    if isinstance(created_at, (int, float)):
+                        try:
+                            pub_date = datetime.fromtimestamp(int(created_at), tz=timezone.utc).isoformat()
+                        except Exception:
+                            pub_date = None
+                    elif isinstance(created_at, str) and created_at.strip():
+                        val = created_at.strip()
+                        if val.isdigit():
+                            try:
+                                pub_date = datetime.fromtimestamp(int(val), tz=timezone.utc).isoformat()
+                            except Exception:
+                                pub_date = None
+                        else:
+                            pub_date = normalize_publication_date(val) or val
+
+                    # Skip job if date is unparseable, missing, or outside 24h window
+                    if not pub_date or not is_within_24_hours(pub_date):
+                        logger.debug(f"Skipping Arbeitnow job with invalid/stale date: {pub_date}")
                         continue
                         
                     role_family = "Engineering"

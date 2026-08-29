@@ -4,6 +4,18 @@ from datetime import datetime, timezone
 import asyncio
 import pandas as pd
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    if os.path.exists(".env"):
+        with open(".env", "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
 from src.scrapers.papers import AcademicPaperScraper
 from src.scrapers.products import ProductLaunchScraper
 from src.scrapers.startups import StartupDirectoryScraper
@@ -12,6 +24,9 @@ from src.scrapers.news import TechNewsScraper
 from src.utils.dedupe_store import URLDedupeStore
 from src.entity_resolution.resolver import EntityResolver
 from src.utils.logger import setup_global_logger
+from src.llm.orchestrator import LLMOrchestrator
+from src.llm.chunking import chunk_text_by_words
+from src.llm.schemas import NewsArticleAnalysis
 
 logger = setup_global_logger()
 
@@ -100,7 +115,35 @@ async def execute_unified_pipeline():
         })
     logger.info(f"Jobs collected: {len(flat_jobs)}")
 
-    # 6. Export to Target Clean Sheets Templates
+    # 6. Process News Articles with LLM Orchestrator & Chunking
+    logger.info("Stage 3/4: Processing news content via LLM Orchestrator & chunking engine...")
+    orchestrator = LLMOrchestrator()
+    for article in raw_news:
+        body = article.get("body_content", "").strip() or article.get("summary", "").strip() or article.get("title", "").strip()
+        if not body:
+            article["llm_summary"] = ""
+            article["llm_key_facts"] = ""
+            continue
+            
+        chunks = chunk_text_by_words(body, max_words=500, overlap=50)
+        extracted_summaries = []
+        extracted_facts = []
+        
+        for chunk in chunks:
+            try:
+                res = orchestrator.extract_structured_data(chunk, NewsArticleAnalysis)
+                if res:
+                    if hasattr(res, "summary") and res.summary:
+                        extracted_summaries.append(res.summary)
+                    if hasattr(res, "key_facts") and res.key_facts:
+                        extracted_facts.extend(res.key_facts)
+            except Exception as e:
+                logger.warning(f"LLM extraction for article chunk failed: {e}")
+                
+        article["llm_summary"] = " ".join(extracted_summaries) if extracted_summaries else ""
+        article["llm_key_facts"] = "; ".join(extracted_facts) if extracted_facts else ""
+
+    # 7. Export to Target Clean Sheets Templates
     logger.info("Stage 4/4: Flashing all completed tables to hard drive cache...")
     pd.DataFrame(flat_startups).to_csv(f"{output_dir}/startups.csv", index=False)
     pd.DataFrame(flat_products).to_csv(f"{output_dir}/products.csv", index=False)

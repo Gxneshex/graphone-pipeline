@@ -25,6 +25,12 @@ def retry_with_backoff(
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
+                    err_str = str(e).lower()
+                    # If missing API key or credentials, fail fast to allow prompt fallback chain evaluation
+                    if any(k in err_str for k in ["api key", "credential", "unauthorized", "authentication"]):
+                        logger.warning(f"Function {func.__name__} encountered unrecoverable credential error: {e}")
+                        raise e
+
                     attempt += 1
                     if attempt > retries:
                         logger.error(f"Function {func.__name__} failed permanently after {retries} retries. Error: {e}")
