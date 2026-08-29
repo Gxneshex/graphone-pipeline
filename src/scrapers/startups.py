@@ -1,10 +1,11 @@
 """
 src/scrapers/startups.py
-Legitimate, traceble Y Combinator company directory scraper.
-Switches to a zero-auth public YC mirror array to completely bypass Algolia 403 tokens.
+Scrapes real startup profiles from Y Combinator's official directory using live Algolia index.
 """
 
 import logging
+import re
+import json
 from typing import List
 from datetime import datetime, timezone
 import requests
@@ -14,52 +15,101 @@ from src.utils.dedupe_store import URLDedupeStore
 
 logger = logging.getLogger("graphone-pipeline.scrapers.startups")
 
+DEFAULT_ALGOLIA_APP = "45BWZJ1SGC"
+DEFAULT_ALGOLIA_KEY = "NzllNTY5MzJiZGM2OTY2ZTQwMDEzOTNhYWZiZGRjODlhYzVkNjBmOGRjNzJiMWM4ZTU0ZDlhYTZjOTJiMjlhMWFuYWx5dGljc1RhZ3M9eWNkYyZyZXN0cmljdEluZGljZXM9WUNDb21wYW55X3Byb2R1Y3Rpb24lMkNZQ0NvbXBhbnlfQnlfTGF1bmNoX0RhdGVfcHJvZHVjdGlvbiZ0YWdGaWx0ZXJzPSU1QiUyMnljZGNfcHVibGljJTIyJTVE"
+
 class StartupDirectoryScraper:
     def __init__(self, dedupe_store: URLDedupeStore = None):
         self.dedupe_store = dedupe_store if dedupe_store else URLDedupeStore()
 
-    def scrape_startups(self) -> List[Startup]:
-        """Extracts legitimate, traceable corporate entities from an open dataset profile mirror."""
-        scraped_startups: List[Startup] = []
+    def _get_algolia_credentials(self):
+        """Dynamically extract Algolia App ID and Search API Key from YC companies page."""
         try:
-            logger.info("Algolia network returned 403 Forbidden. Switching to open YC directory mirror stream...")
-            # Querying a live public archive dataset tracking real, valid YC companies
-            url = "https://githubusercontent.com"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0"}
-            res = requests.get(url, headers=headers, timeout=12)
-            
+            res = requests.get("https://www.ycombinator.com/companies", headers=headers, timeout=10)
             if res.status_code == 200:
-                companies_data = res.json()
-                # Parse the first 15 authentic startups from the live list
-                for item in companies_data[:15]:
+                match = re.search(r'window\.AlgoliaOpts\s*=\s*(\{.*?\});', res.text)
+                if match:
+                    opts = json.loads(match.group(1))
+                    app = opts.get("app")
+                    key = opts.get("key")
+                    if app and key:
+                        return app, key
+        except Exception as e:
+            logger.warning(f"Could not extract dynamic Algolia credentials: {e}. Using defaults.")
+        return DEFAULT_ALGOLIA_APP, DEFAULT_ALGOLIA_KEY
+
+    def scrape_startups(self, target_count: int = 1000) -> List[Startup]:
+        """Extracts real Y Combinator companies from Algolia directory API."""
+        scraped_startups: List[Startup] = []
+        app_id, api_key = self._get_algolia_credentials()
+        
+        logger.info(f"Ingesting real YC startups via Algolia API (Target: {target_count})...")
+        endpoint = f"https://{app_id}-dsn.algolia.net/1/indexes/YCCompany_production/query"
+        headers = {
+            "X-Algolia-API-Key": api_key,
+            "X-Algolia-Application-Id": app_id,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GraphOnePipeline/1.0"
+        }
+        
+        hits_per_page = 100
+        page = 0
+        max_pages = (target_count + hits_per_page - 1) // hits_per_page
+        
+        while len(scraped_startups) < target_count and page < max_pages:
+            try:
+                payload = {"params": f"hitsPerPage={hits_per_page}&page={page}"}
+                res = requests.post(endpoint, json=payload, headers=headers, timeout=12)
+                
+                if res.status_code != 200:
+                    logger.error(f"Algolia query failed on page {page} with status {res.status_code}")
+                    break
+                    
+                data = res.json()
+                hits = data.get("hits", [])
+                if not hits:
+                    break
+                    
+                for item in hits:
+                    if len(scraped_startups) >= target_count:
+                        break
+                        
                     name = item.get("name", "").strip()
-                    slug = item.get("slug", "").strip() or name.replace(" ", "-").lower()
-                    if not name:
+                    slug = item.get("slug", "").strip()
+                    if not name or not slug:
                         continue
                         
-                    source_url = f"https://ycombinator.com{slug}"
+                    source_url = f"https://www.ycombinator.com/companies/{slug}"
                     
                     if not self.dedupe_store.is_new(source_url):
                         continue
+                        
+                    team_size = item.get("team_size")
+                    try:
+                        employee_count = int(team_size) if team_size is not None else 1
+                    except (ValueError, TypeError):
+                        employee_count = 1
                         
                     startup_instance = Startup(
                         schemaVersion="1.0",
                         recordType="STARTUP",
                         source=SourceMetadata(
-                            name="YCombinator Directory (Mirror)",
+                            name="Y Combinator Directory",
                             url=source_url
                         ),
                         content=StartupContent(
                             entityName=name,
-                            data=StartupContentData(employeeCount=item.get("team_size", 25))
+                            data=StartupContentData(employeeCount=employee_count)
                         ),
                         collectedAt=datetime.now(timezone.utc).isoformat()
                     )
                     scraped_startups.append(startup_instance)
-            else:
-                logger.error(f"Fallback YC data tracking channel failed. HTTP Status: {res.status_code}")
+                    
+                page += 1
+            except Exception as e:
+                logger.error(f"Error requesting YC Algolia batch page {page}: {e}")
+                break
                 
-        except Exception as e:
-            logger.error(f"Ecosystem startup scraper failed to extract rows: {e}")
-            
+        logger.info(f"Successfully collected {len(scraped_startups)} real YC startups.")
         return scraped_startups

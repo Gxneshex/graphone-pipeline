@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 import ssl
 import certifi
 import requests
+import concurrent.futures
 
 from src.llm.schemas import ResearchPaper, ResearchPaperContent
 from src.utils.retry import retry_with_backoff
@@ -18,7 +19,6 @@ logger = logging.getLogger("graphone-pipeline.scrapers.papers")
 
 class AcademicPaperScraper:
     def __init__(self, raw_backup_path: str = "data/output/raw_papers_cache.jsonl"):
-        # FIX 3: Point to the accurate XML gateway interface
         self.arxiv_base_url = "http://export.arxiv.org/api/query?"
         self.pwc_search_url = "https://paperswithcode.com/api/v1/search/"
         self.raw_backup_path = raw_backup_path
@@ -62,7 +62,6 @@ class AcademicPaperScraper:
             parts = cleaned_path.split("/")
             if len(parts) >= 2:
                 owner, repo = parts[0], parts[1]
-                # FIX 5: Repair string structure
                 api_url = f"https://api.github.com/repos/{owner}/{repo}"
                 headers = {"User-Agent": "GraphOne-Intelligence-Pipeline-Bot"}
                 res = requests.get(api_url, headers=headers, timeout=5)
@@ -74,10 +73,10 @@ class AcademicPaperScraper:
 
     def _find_code_repository(self, title: str) -> Optional[str]:
         try:
-            # FIX 6: Target the formal search endpoint 
             encoded_title = urllib.parse.quote(title)
             url = f"{self.pwc_search_url}?q={encoded_title}"
-            res = self._execute_network_request(url, is_xml=False, timeout=10)
+            headers = {'User-Agent': 'GraphOnePipeline/1.0'}
+            res = requests.get(url, headers=headers, timeout=1.5)
             
             if res.status_code == 200:
                 data = res.json()
@@ -90,6 +89,29 @@ class AcademicPaperScraper:
         except Exception as e:
             logger.debug(f"PapersWithCode correlation skipped for '{title[:30]}': {e}")
         return None
+
+    def _process_single_entry(self, entry, ns) -> ResearchPaper:
+        title = entry.find("atom:title", ns).text.strip().replace("\n", " ")
+        arxiv_url = entry.find("atom:id", ns).text.strip()
+        published_date = entry.find("atom:published", ns).text.strip()
+        authors = [a.find("atom:name", ns).text.strip() for a in entry.findall("atom:author", ns)]
+        
+        self._stream_append_to_jsonl({"title": title, "arxiv_url": arxiv_url})
+        git_url = self._find_code_repository(title)
+        star_count = self._fetch_github_stars(git_url) if git_url else 0
+        
+        return ResearchPaper(
+            schemaVersion="1.0",
+            recordType="RESEARCH_PAPER",
+            content=ResearchPaperContent(
+                title=title,
+                authors=authors,
+                paper_url=arxiv_url,
+                github_url=git_url,
+                github_stars=star_count,
+                published_date=published_date
+            )
+        )
 
     def scrape_bulk_papers(self, target_count: int = 100, page_size: int = 50) -> List[ResearchPaper]:
         final_validated_models: List[ResearchPaper] = []
@@ -112,42 +134,21 @@ class AcademicPaperScraper:
                 raw_xml = self._execute_network_request(query_url, is_xml=True)
                 root = ET.fromstring(raw_xml)
                 
-                # FIX 4: Correct the Atom XML Syndication Format Namespace
                 ns = {"atom": "http://www.w3.org/2005/Atom"}
                 entries = root.findall("atom:entry", ns)
                 
                 if not entries:
                     break
                     
-                for entry in entries:
-                    if len(final_validated_models) >= target_count:
-                        break
-                        
-                    title = entry.find("atom:title", ns).text.strip().replace("\n", " ")
-                    arxiv_url = entry.find("atom:id", ns).text.strip()
-                    published_date = entry.find("atom:published", ns).text.strip()
-                    authors = [a.find("atom:name", ns).text.strip() for a in entry.findall("atom:author", ns)]
-                    
-                    self._stream_append_to_jsonl({"title": title, "arxiv_url": arxiv_url})
-                    git_url = self._find_code_repository(title)
-                    star_count = self._fetch_github_stars(git_url)
-                    
-                    paper_instance = ResearchPaper(
-                        schemaVersion="1.0",
-                        recordType="RESEARCH_PAPER",
-                        content=ResearchPaperContent(
-                            title=title,
-                            authors=authors,
-                            paper_url=arxiv_url,
-                            github_url=git_url,
-                            github_stars=star_count,
-                            published_date=published_date
-                        )
-                    )
-                    final_validated_models.append(paper_instance)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+                    futures = [executor.submit(self._process_single_entry, entry, ns) for entry in entries]
+                    for future in concurrent.futures.as_completed(futures):
+                        if len(final_validated_models) < target_count:
+                            paper_instance = future.result()
+                            final_validated_models.append(paper_instance)
                 
                 current_start += page_size
-                time.sleep(2.0)
+                time.sleep(1.0)
                 
             except Exception as e:
                 logger.error(f"Error processing arXiv block chunk: {e}")
