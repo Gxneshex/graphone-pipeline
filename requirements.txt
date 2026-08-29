@@ -14,5 +14,3 @@ beautifulsoup4>=4.12.0
 feedparser>=6.0.0
 trafilatura>=1.6.0
 certifi>=2023.0.0
-pip install -r requirements.txt
-python run_pipeline.py
