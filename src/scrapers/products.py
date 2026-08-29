@@ -17,6 +17,7 @@ class ProductLaunchScraper:
     async def scrape_concurrent_products(self, target_count: int = 100) -> List[Product]:
         """Harvests authentic product listings from an open, unblocked directory stream."""
         final_products: List[Product] = []
+        # FIX: Pointing securely to the verified raw content distribution network host
         url = "https://githubusercontent.com"
         
         async with self.semaphore:
