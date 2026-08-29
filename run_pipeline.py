@@ -31,6 +31,7 @@ async def execute_unified_pipeline():
     news_scraper = TechNewsScraper(dedupe_store=dedupe)
     
     entity_mapping_logs = []
+    seen_entity_mappings = set()
 
     # 1. Harvest Data Vectors
     logger.info("Stage 1/4: Ingesting active data streams from real sources...")
@@ -40,9 +41,17 @@ async def execute_unified_pipeline():
     raw_jobs = job_scraper.scrape_jobs(target_count=1000)
     raw_news = news_scraper.scrape_news()
 
-    # 2. Serialize Startups
+    # 2. Serialize Startups & Run Entity Resolution on Startup Names
     flat_startups = []
     for s in startups:
+        raw_name = s.content.entityName.strip()
+        resolved = resolver.resolve_company(raw_name, threshold=0.30)
+        if resolved in resolver.canonical_companies and raw_name.lower() != resolved.lower():
+            pair = (raw_name, resolved)
+            if pair not in seen_entity_mappings:
+                seen_entity_mappings.add(pair)
+                entity_mapping_logs.append({"raw_string": raw_name, "canonical_entity": resolved})
+
         flat_startups.append({
             "schemaVersion": s.schemaVersion, "recordType": s.recordType,
             "source_name": s.source.name, "source_url": s.source.url,
@@ -51,9 +60,17 @@ async def execute_unified_pipeline():
         })
     logger.info(f"Startups collected: {len(flat_startups)}")
 
-    # 3. Serialize Products
+    # 3. Serialize Products & Run Entity Resolution on Product Startup Names
     flat_products = []
     for pr in products:
+        raw_name = pr.content.startupName.strip()
+        resolved = resolver.resolve_company(raw_name, threshold=0.30)
+        if resolved in resolver.canonical_companies and raw_name.lower() != resolved.lower():
+            pair = (raw_name, resolved)
+            if pair not in seen_entity_mappings:
+                seen_entity_mappings.add(pair)
+                entity_mapping_logs.append({"raw_string": raw_name, "canonical_entity": resolved})
+
         flat_products.append({
             "schemaVersion": pr.schemaVersion, "recordType": pr.recordType,
             "source_name": pr.source.name, "source_url": pr.source.url,
@@ -65,10 +82,6 @@ async def execute_unified_pipeline():
     # 4. Serialize Research Papers
     flat_papers = []
     for p in papers:
-        resolved = resolver.resolve_company(p.content.title, threshold=0.55)
-        if resolved != p.content.title:
-            entity_mapping_logs.append({"raw_string": p.content.title, "canonical_entity": resolved})
-            
         flat_papers.append({
             "schemaVersion": p.schemaVersion, "recordType": p.recordType,
             "content_title": p.content.title, "content_authors": ", ".join(p.content.authors),
@@ -102,7 +115,8 @@ async def execute_unified_pipeline():
     logger.info(
         f"Pipeline execution completed cleanly. Honest row counts achieved: "
         f"Startups={len(flat_startups)}, Products={len(flat_products)}, "
-        f"Papers={len(flat_papers)}, Jobs={len(flat_jobs)}, News={len(raw_news)}"
+        f"Papers={len(flat_papers)}, Jobs={len(flat_jobs)}, News={len(raw_news)}, "
+        f"Mapped Entities={len(entity_mapping_logs)}"
     )
 
 if __name__ == "__main__":

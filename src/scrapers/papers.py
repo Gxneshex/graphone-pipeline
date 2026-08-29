@@ -4,12 +4,14 @@ import json
 import logging
 import urllib.request
 import urllib.parse
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import ssl
 import certifi
 import requests
+from bs4 import BeautifulSoup
 import concurrent.futures
 
 from src.llm.schemas import ResearchPaper, ResearchPaperContent
@@ -19,7 +21,7 @@ logger = logging.getLogger("graphone-pipeline.scrapers.papers")
 
 class AcademicPaperScraper:
     def __init__(self, raw_backup_path: str = "data/output/raw_papers_cache.jsonl"):
-        self.arxiv_base_url = "http://export.arxiv.org/api/query?"
+        self.arxiv_base_url = "https://export.arxiv.org/api/query?"
         self.pwc_search_url = "https://paperswithcode.com/api/v1/search/"
         self.raw_backup_path = raw_backup_path
         
@@ -35,24 +37,14 @@ class AcademicPaperScraper:
             logger.error(f"Failed writing raw line cache stream to disk: {e}")
 
     @retry_with_backoff(retries=4, base_delay=3.0, max_delay=30.0)
-    def _execute_network_request(self, url: str, is_xml: bool = False, timeout: int = 15) -> Any:
+    def _execute_network_request(self, url: str, is_xml: bool = False, timeout: int = 30) -> Any:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=timeout)
+        if response.status_code == 429:
+            raise RuntimeError("API Rate Limit Hit (429)")
         if is_xml:
-            try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'GraphOnePipeline/1.0'})
-                ssl_context = ssl.create_default_context(cafile=certifi.where())
-                with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
-                    return response.read().decode("utf-8")
-            except Exception:
-                ssl_context = ssl._create_unverified_context()
-                req = urllib.request.Request(url, headers={'User-Agent': 'GraphOnePipeline/1.0'})
-                with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
-                    return response.read().decode("utf-8")
-        else:
-            headers = {'User-Agent': 'GraphOnePipeline/1.0'}
-            response = requests.get(url, headers=headers, timeout=timeout)
-            if response.status_code == 429:
-                raise RuntimeError("API Rate Limit Hit (429)")
-            return response
+            return response.text
+        return response
 
     def _fetch_github_stars(self, repo_url: str) -> int:
         if not repo_url or "github.com" not in repo_url.lower():
@@ -63,31 +55,42 @@ class AcademicPaperScraper:
             if len(parts) >= 2:
                 owner, repo = parts[0], parts[1]
                 api_url = f"https://api.github.com/repos/{owner}/{repo}"
-                headers = {"User-Agent": "GraphOne-Intelligence-Pipeline-Bot"}
-                res = requests.get(api_url, headers=headers, timeout=5)
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                res = requests.get(api_url, headers=headers, timeout=3)
                 if res.status_code == 200:
                     return int(res.json().get("stargazers_count", 0))
         except Exception as e:
             logger.debug(f"GitHub stars verification failed for {repo_url}: {e}")
         return 0
 
-    def _find_code_repository(self, title: str) -> Optional[str]:
-        try:
-            encoded_title = urllib.parse.quote(title)
-            url = f"{self.pwc_search_url}?q={encoded_title}"
-            headers = {'User-Agent': 'GraphOnePipeline/1.0'}
-            res = requests.get(url, headers=headers, timeout=1.5)
-            
-            if res.status_code == 200:
-                data = res.json()
-                results = data.get("results", [])
-                if results and isinstance(results, list):
-                    paper_data = results[0].get("paper", {})
-                    repo_url = paper_data.get("repository", {}).get("url")
-                    if repo_url:
-                        return repo_url
-        except Exception as e:
-            logger.debug(f"PapersWithCode correlation skipped for '{title[:30]}': {e}")
+    def _find_code_repository(self, title: str, arxiv_url: Optional[str] = None) -> Optional[str]:
+        if not title:
+            return None
+
+        clean_title = re.sub(r'[^a-zA-Z0-9\s]', ' ', title).strip()
+        words = [w for w in clean_title.split() if len(w) > 2]
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+
+        # Query GitHub Search API for matching paper repository
+        if words:
+            try:
+                short_q = ' '.join(words[:6])
+                url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(short_q)}&sort=stars"
+                res = requests.get(url, headers=headers, timeout=2.0)
+                if res.status_code == 200:
+                    data = res.json()
+                    items = data.get("items", [])
+                    for top in items[:5]:
+                        repo_name = top.get("name", "").lower().replace("-", " ").replace("_", " ")
+                        desc = (top.get("description") or "").lower()
+                        repo_words = set(repo_name.split() + desc.split())
+                        matching_words = [w.lower() for w in words if w.lower() in repo_words]
+                        
+                        if len(matching_words) >= min(3, len(words)):
+                            return top.get("html_url")
+            except Exception as e:
+                logger.debug(f"GitHub repository search skipped for '{title[:30]}': {e}")
+
         return None
 
     def _process_single_entry(self, entry, ns) -> ResearchPaper:
@@ -97,7 +100,7 @@ class AcademicPaperScraper:
         authors = [a.find("atom:name", ns).text.strip() for a in entry.findall("atom:author", ns)]
         
         self._stream_append_to_jsonl({"title": title, "arxiv_url": arxiv_url})
-        git_url = self._find_code_repository(title)
+        git_url = self._find_code_repository(title, arxiv_url=arxiv_url)
         star_count = self._fetch_github_stars(git_url) if git_url else 0
         
         return ResearchPaper(
@@ -113,7 +116,7 @@ class AcademicPaperScraper:
             )
         )
 
-    def scrape_bulk_papers(self, target_count: int = 100, page_size: int = 50) -> List[ResearchPaper]:
+    def scrape_bulk_papers(self, target_count: int = 1000, page_size: int = 50) -> List[ResearchPaper]:
         final_validated_models: List[ResearchPaper] = []
         current_start = 0
         search_query = "cat:cs.AI OR cat:cs.LG"
@@ -140,7 +143,7 @@ class AcademicPaperScraper:
                 if not entries:
                     break
                     
-                with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(self._process_single_entry, entry, ns) for entry in entries]
                     for future in concurrent.futures.as_completed(futures):
                         if len(final_validated_models) < target_count:
@@ -148,10 +151,11 @@ class AcademicPaperScraper:
                             final_validated_models.append(paper_instance)
                 
                 current_start += page_size
-                time.sleep(1.0)
+                time.sleep(3.0)
                 
             except Exception as e:
                 logger.error(f"Error processing arXiv block chunk: {e}")
-                break
+                time.sleep(3.0)
+                continue
 
         return final_validated_models
