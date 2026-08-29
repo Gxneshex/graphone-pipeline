@@ -1,10 +1,6 @@
-"""
-src/scrapers/news.py
-Aggregates technology news feeds, media articles, and industry announcements
-while enforcing tracking deduplication.
-"""
-
 import logging
+import feedparser
+import trafilatura
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
@@ -12,33 +8,46 @@ from src.utils.dedupe_store import URLDedupeStore
 
 logger = logging.getLogger("graphone-pipeline.scrapers.news")
 
+FEEDS = {
+    "TechCrunch AI": "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "VentureBeat AI": "https://venturebeat.com/category/ai/feed/",
+}
+
 class TechNewsScraper:
     def __init__(self, dedupe_store: URLDedupeStore = None):
-        # FIX: Added the missing colon to eliminate the SyntaxError
         self.dedupe_store = dedupe_store if dedupe_store else URLDedupeStore()
 
     def scrape_news(self) -> List[Dict[str, Any]]:
-        """Main news workflow. Aggregates clean article blocks."""
         scraped_articles: List[Dict[str, Any]] = []
-        try:
-            mock_news = [
-                {"title": "AlphaLayer AI Secures Seed Funding for Graph AI Workflows", "url": "https://techcrunch.com"},
-                {"title": "Open Source Models Close the Gap on Reasoning Benchmarks", "url": "https://venturebeat.com"}
-            ]
-            
-            for item in mock_news:
-                if not self.dedupe_store.is_new(item["url"]):
+        for source_name, feed_url in FEEDS.items():
+            try:
+                parsed = feedparser.parse(feed_url)
+            except Exception as e:
+                logger.error(f"Feed fetch failed for {source_name}: {e}")
+                continue
+
+            for entry in parsed.entries:
+                url = entry.get("link")
+                if not url or not self.dedupe_store.is_new(url):
                     continue
-                    
+
+                # real published timestamp from the feed, not a fabricated "now"
+                published = entry.get("published_parsed")
+                published_iso = (
+                    datetime(*published[:6], tzinfo=timezone.utc).isoformat()
+                    if published else None
+                )
+
+                full_text = trafilatura.extract(trafilatura.fetch_url(url)) or ""
+
                 scraped_articles.append({
-                    "title": item["title"],
-                    "source_name": "TechCrunch AI" if "techcrunch" in item["url"] else "VentureBeat AI",
-                    "author": "Data Intelligence Team",
-                    "url": item["url"],
-                    "summary": "Legitimate sector tracking data point captured at source link.",
-                    "body_content": "Full lengthy article text verified at upstream URL.",
-                    "extracted_at": datetime.now(timezone.utc).isoformat()
+                    "title": entry.get("title", ""),
+                    "source_name": source_name,
+                    "author": entry.get("author", "Unknown"),
+                    "url": url,
+                    "summary": entry.get("summary", "")[:500],
+                    "body_content": full_text,
+                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    "published_at": published_iso,
                 })
-        except Exception as e:
-            logger.error(f"News scraping process skipped or failed: {e}")
         return scraped_articles
