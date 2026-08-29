@@ -10,3 +10,9 @@ playwright-stealth>=1.0.6
 google-genai>=0.1.1
 groq>=0.4.0
 openai>=1.10.0
+beautifulsoup4>=4.12.0
+feedparser>=6.0.0
+trafilatura>=1.6.0
+certifi>=2023.0.0
+pip install -r requirements.txt
+python run_pipeline.py
