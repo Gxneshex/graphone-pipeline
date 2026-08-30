@@ -31,7 +31,7 @@ class LLMOrchestrator:
         # Pull model designations or assign default standard primitives
         self.gemini_model = os.getenv("PRIMARY_LLM_MODEL", "gemini-2.5-flash")
         self.groq_model = os.getenv("FALLBACK_LLM_MODEL", "llama-3.3-70b-versatile")
-        self.deepseek_model = "deepseek-chat"
+        self.deepseek_model = "gpt-4o-mini"
 
     @retry_with_backoff(retries=3, base_delay=2.0, max_delay=15.0, exceptions=(Exception,))
     def _call_gemini_tier(self, prompt: str, target_schema: Type[T]) -> str:
@@ -81,11 +81,12 @@ class LLMOrchestrator:
 
     @retry_with_backoff(retries=3, base_delay=2.0, max_delay=15.0, exceptions=(Exception,))
     def _call_deepseek_tier(self, prompt: str) -> str:
-        """Tier 3 Fallback Execution: Standard JSON object generation using DeepSeek."""
+        """Tier 3 Fallback Execution: Standard JSON object generation using OpenAI."""
         logger.info(f"Cascading to Final Tier 3 Fallback Engine ({self.deepseek_model})...")
-        # Standard OpenAI client layout mapping to DeepSeek endpoints
+        if not self.openai_key:
+            raise ValueError("OpenAI credential token missing from runtime parameters.")
         from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY", ""), base_url="https://deepseek.com")
+        client = OpenAI(api_key=self.openai_key)
         
         response = client.chat.completions.create(
             model=self.deepseek_model,
@@ -95,7 +96,7 @@ class LLMOrchestrator:
         )
         res_text = response.choices[0].message.content
         if not res_text:
-            raise ValueError("Empty completion block returned from DeepSeek API tier.")
+            raise ValueError("Empty completion block returned from OpenAI API tier.")
         return res_text.strip()
 
     def _execute_fallback_chain(self, prompt: str, target_schema: Type[T]) -> str:
